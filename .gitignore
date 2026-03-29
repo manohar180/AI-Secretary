@@ -1,0 +1,25 @@
+# Python / Backend
+backend/.env
+backend/token.json
+backend/credentials.json
+backend/token_offline.json.bak
+backend/__pycache__/
+backend/*.pyc
+backend/pytest_cache/
+.venv/
+venv/
+ENV/
+env/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
