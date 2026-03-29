@@ -160,6 +160,138 @@ async def disconnect_google():
     return {"status": "success", "message": "Google Integration severed."}
 
 # --- Frontend Live Data API ---
+from fastapi.responses import HTMLResponse
+
+@app.get("/api/v1/public/schedule/accept", response_class=HTMLResponse)
+async def public_schedule_accept(email: str, time: str):
+    """
+    Public webhook hit when a user clicks an [Accept] button inside an AI-drafted email.
+    """
+    from datetime import datetime
+    try:
+        if gmail_service:
+            meet_link = gmail_service.create_google_meet(email, time)
+            
+            # Format time beautifully for the UI
+            dt = datetime.fromisoformat(time.replace('Z', '+00:00'))
+            human_time = dt.strftime("%A, %B %d at %I:%M %p")
+            
+            if meet_link:
+                return f"""
+                <html>
+                    <head>
+                        <title>Meeting Confirmed</title>
+                        <style>
+                            body {{ font-family: 'Inter', sans-serif; background: #0f172a; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
+                            .card {{ background: rgba(255,255,255,0.05); padding: 40px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.1); text-align: center; max-width: 500px; }}
+                            .btn {{ display: inline-block; background: #3b82f6; color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; margin-top: 20px; font-weight: 600; }}
+                        </style>
+                    </head>
+                    <body>
+                        <div class="card">
+                            <h1 style="color: #10b981; margin-bottom: 8px;">✅ Meeting Confirmed!</h1>
+                            <p style="color: #94a3b8; line-height: 1.5;">Your meeting has been locked in for <strong>{human_time}</strong>.</p>
+                            <p style="color: #94a3b8;">A Google calendar invitation has been sent to your inbox.</p>
+                            <a href="{meet_link}" class="btn" target="_blank">Open Google Meet</a>
+                        </div>
+                    </body>
+                </html>
+                """
+    except Exception as e:
+        print(f"Failed to confirm meeting: {e}")
+        
+    return "<html><body><h2>Something went wrong checking the calendar. Please reply directly to the email.</h2></body></html>"
+
+from pydantic import BaseModel
+class ChatRequest(BaseModel):
+    message: str
+
+@app.post("/api/v1/chat")
+async def chat_orchestrator(req: ChatRequest):
+    """
+    The Multimodal AI Backend Agent. Handles natural language commands to Block Calendar, Draft Emails, or answer questions.
+    """
+    try:
+        from groq import Groq
+        from app.core.config import settings
+        
+        # Initialize isolated Groq client
+        groq_client = Groq(api_key=settings.GROQ_API_KEY)
+        from datetime import datetime
+        system_prompt = f"""
+You are the CoordAI Command Center Assistant. 
+CURRENT TIME: {datetime.now().isoformat()}
+
+You have THREE distinct capabilities. You must analyze the user's input and reply STRICTLY in valid JSON format. Do not use Markdown block syntax (```json). Just output raw JSON.
+
+1. "BLOCK_CALENDAR": If the user explicitly asks to block time, make time busy, or reserve time.
+   Format: {{"intent": "BLOCK_CALENDAR", "start_iso": "<ISO format>", "end_iso": "<ISO format>", "title": "Blocked via AI", "response_text": "I have successfully blocked that time."}}
+   Calculate the ISO mathematically based on the CURRENT TIME. Remember all time strings MUST end in +05:30 for IST.
+
+2. "DRAFT_EMAIL": If the user explicitly states an email address and asks to write/draft an email to them.
+   Format: {{"intent": "DRAFT_EMAIL", "recipient": "example@domain.com", "subject": "...", "body": "...", "response_text": "I have drafted the email. It is now waiting in your Approvals queue on the Dashboard!"}}
+
+3. "GENERAL_CHAT": For all other natural language queries.
+   Format: {{"intent": "GENERAL_CHAT", "response_text": "<Your conversational answer>"}}
+"""
+
+        import json
+        response = groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": req.message}
+            ],
+            model="llama-3.1-8b-instant",
+            temperature=0.0
+        )
+        
+        raw_text = response.choices[0].message.content.strip()
+        # Clean potential markdown
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:-3]
+        elif raw_text.startswith("```"):
+            raw_text = raw_text[3:-3]
+            
+        data = json.loads(raw_text.strip())
+        
+        intent = data.get("intent", "GENERAL_CHAT")
+        response_text = data.get("response_text", "Done.")
+        
+        if intent == "BLOCK_CALENDAR":
+            start_iso = data.get("start_iso")
+            end_iso = data.get("end_iso")
+            title = data.get("title", "AI Reserved Time")
+            if gmail_service and start_iso and end_iso:
+                success = gmail_service.block_calendar_time(start_iso, end_iso, title)
+                if not success:
+                    response_text = "I failed to block that time. Calendar authorization may have expired."
+            else:
+                response_text = "I couldn't parse the time properly, or Gmail is disconnected."
+                
+        elif intent == "DRAFT_EMAIL":
+            # Push into the existing DB_TASKS workflow queue
+            import uuid
+            new_task = {
+                "id": str(uuid.uuid4())[:8],
+                "tenant": data.get("recipient", "Manual AI Draft").split("@")[0].title(),
+                "stage": "MANUAL_COMMAND",
+                "daysPending": 0,
+                "actionElected": "DRAFT_EMAIL",
+                "confidence": "100%",
+                "draftContent": data.get("body", "Failed to generate body..."),
+                "summary": "You explicitly requested this email to be drafted via the AI Command Center.",
+                "contact_email": data.get("recipient"),
+                "subject": data.get("subject", "Follow Up"),
+                "status": "pending"
+            }
+            DB_TASKS[new_task["id"]] = new_task
+            print(f"✅ AI Orchestrator manually pushed DRAFT_EMAIL task to Approvals.")
+
+        return {"response_text": response_text}
+    except Exception as e:
+        print(f"❌ Chat Error: {e}")
+        return {"response_text": "I suffered an internal parsing failure. Please try another command."}
+
 @app.post("/api/v1/workflow/sync-inbox")
 async def sync_inbox():
     """
@@ -205,20 +337,22 @@ async def sync_inbox():
         1. Write exactly 3 bullet points summarizing the core request.
         2. Write a professional, polite, and concise reply.
         
-        CRITICAL SCHEDULING RULE: You must gracefully propose available 30-minute meeting slots based on the math below.
+        CRITICAL SCHEDULING RULE: You must gracefully propose available 30-minute meeting slots based on the Guaranteed mathematical slots below.
         CURRENT LOCAL TIME: {current_time_str}
         
-        Here is the user's actual BUSY CALENDAR for the next 7 days (already calculated into IST format):
+        Here is the Exact Array of GUARANTEED FREE SLOTS available to you (Format: [ISO_STRING] Human Readable Time):
         {calendar_context}
         
         Rules for Calculation:
-        1. Working hours are STRICTLY 10:00 AM to 7:00 PM IST. You are FORBIDDEN from proposing any time before 10:00 AM or after 7:00 PM. Treat all other times as mathematically impossible.
-        2. If the sender requests a specific exact time (e.g., "Can we meet at 4 PM?"), check if that exact slot is available. If it is, propose ONLY that single slot confirming it works.
-        3. Otherwise, identify exactly 3 to 4 logical 30-minute gaps that DO NOT overlap with the busy blocks.
-        4. If the sender requests a specific day, you MUST restrict your slot proposals strictly to that requested day.
-        5. If the sender requests "nearest available" but no slots remain today before 7:00 PM, roll over and schedule them starting TOMORROW at 10:00 AM.
-        6. Suggest the times naturally inside the email text.
-        7. INTENT PROTOCOL: If the incoming email is the sender explicitly agreeing to a specific time that works (e.g. "Yes, Wednesday 2 PM works"), you must append the following string to the absolute bottom of your generated reply: `ACTION_SCHEDULE: <YYYY-MM-DDTHH:MM:00+05:30>` (Use the agreed date/time logically calculated). In the draft itself, confirm the meeting is booked and write "Here is the meeting link: [MEET_LINK]".
+        1. You are FORBIDDEN from inventing times or doing math. You MUST ONLY pick times explicitly listed in the GUARANTEED FREE SLOTS array.
+        2. If the sender requests a specific exact time (e.g., "Can we meet Wednesday at 4 PM?"), check if that exact slot is in the array. If it is, propose ONLY that single slot. If it is NOT in the array, tell them you are unavailable then and propose 3 other slots from the array.
+        3. Otherwise, pick exactly the FIRST 3 chronological slots perfectly in order from the top of the array and propose them. You MUST NOT randomly sample slots to ensure strict consistency.
+        4. Suggest the times naturally inside the email text.
+        5. INTENT PROTOCOL: If the incoming email is the sender explicitly agreeing to a specific time that works, append `ACTION_SCHEDULE: <YYYY-MM-DDTHH:MM:00+05:30>` to the bottom and write "Here is the meeting link: [MEET_LINK]".
+        6. BUTTON PROTOCOL: If you are *proposing* times, you must append an exact machine-readable array of the raw ISO datetimes you proposed at the absolute bottom of your response like this:
+           PROPOSED_SLOTS:
+           - 2026-03-31T14:30:00+05:30
+           - 2026-03-31T15:00:00+05:30
         
         Format your response EXACTLY like this:
         SUMMARY:
@@ -249,12 +383,25 @@ async def sync_inbox():
             
             # Detect Secret Machine Intent Code
             schedule_time = None
-            if "ACTION_SCHEDULE:" in draft:
+            proposed_slots = []
+            
+            if "ACTION_SCHEDULE:" in draft or "PROPOSED_SLOTS:" in draft:
                 lines = draft.split('\n')
                 cleaned_draft_lines = []
+                parsing_slots = False
+                
                 for line in lines:
                     if "ACTION_SCHEDULE:" in line:
                         schedule_time = line.replace("ACTION_SCHEDULE:", "").strip().replace("`", "")
+                    elif "PROPOSED_SLOTS:" in line:
+                        parsing_slots = True
+                    elif parsing_slots and line.strip().startswith("-"):
+                        proposed_slots.append(line.replace("-", "").strip())
+                    elif parsing_slots and not line.strip():
+                        continue # blank line
+                    elif parsing_slots and not line.strip().startswith("-"):
+                        parsing_slots = False
+                        cleaned_draft_lines.append(line)
                     else:
                         cleaned_draft_lines.append(line)
                 draft = "\n".join(cleaned_draft_lines).strip()
@@ -280,6 +427,7 @@ async def sync_inbox():
                 "thread_id": email['thread_id'],
                 "message_id_header": email['message_id_header'],
                 "schedule_time": schedule_time,
+                "proposed_slots": proposed_slots,
                 "status": "pending"
             }
             
@@ -333,6 +481,36 @@ async def approve_workflow(task_id: str):
             else:
                 body_text = body_text.replace("[MEET_LINK]", "\nI will send a separate calendar invite shortly.")
         
+        # --- PHASE 14: INTERACTIVE EMAIL HTML BUTTONS ---
+        if task.get("proposed_slots") and not task.get("schedule_time"):
+            import urllib.parse
+            from datetime import datetime
+            
+            # Convert plain text draft into HTML layout
+            body_text = body_text.replace('\n', '<br>')
+            
+            button_html = "<br><br><div style='margin-top:20px; padding: 16px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; font-family: sans-serif;'>"
+            button_html += "<p style='margin-top:0; font-weight:600; color: #0f172a;'>Select a time below to auto-schedule a Google Meet:</p>"
+            button_html += "<div style='display: flex; gap: 10px; flex-wrap: wrap;'>"
+            
+            # Use Localhost for Hackathon demo, in production use ENV or NGROK
+            base_url = "http://localhost:8000"
+            safe_email = urllib.parse.quote(task['contact_email'])
+            
+            for iso_time in task['proposed_slots']:
+                try:
+                    dt = datetime.fromisoformat(iso_time.replace('Z', '+00:00'))
+                    clean_time = dt.strftime("%A, %I:%M %p")
+                    safe_time = urllib.parse.quote(iso_time)
+                    link = f"{base_url}/api/v1/public/schedule/accept?email={safe_email}&time={safe_time}"
+                    
+                    button_html += f"<a href='{link}' style='display:inline-block; padding:10px 16px; background:#3b82f6; color:white; text-decoration:none; border-radius:6px; font-weight:500; font-size:14px; margin-right:8px; margin-bottom:8px;'>{clean_time}</a>"
+                except Exception:
+                    pass
+            
+            button_html += "</div></div>"
+            body_text += button_html
+            
         print(f"User Approved! Dispatching Live Email to {task['contact_email']} via Gmail API...")
         
         try:

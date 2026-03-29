@@ -15,50 +15,84 @@ class GmailService:
 
     def get_upcoming_availability(self, days: int = 7):
         """
-        Fetches the user's primary calendar events to generate a 'Free/Busy' matrix
-        for the LLM contextual injection prompt.
+        Calculates EXACT available 30-minute slots natively in Python 
+        by subtracting busy calendar events from the 10:00 AM - 7:00 PM IST working hours array.
         """
-        print(f"📅 CalendarService: Fetching availability for next {days} days...")
+        print(f"📅 CalendarService: Calculating exactly GUARANTEED free slots for next {days} days...")
         try:
-            now = datetime.utcnow().isoformat() + 'Z'
-            end_time = (datetime.utcnow() + timedelta(days=days)).isoformat() + 'Z'
+            now_utc = datetime.utcnow()
+            end_time_utc = now_utc + timedelta(days=days)
             
+            # 1. Fetch all events
             events_result = self.calendar_service.events().list(
-                calendarId='primary', timeMin=now, timeMax=end_time,
+                calendarId='primary', timeMin=now_utc.isoformat() + 'Z', timeMax=end_time_utc.isoformat() + 'Z',
                 singleEvents=True, orderBy='startTime'
             ).execute()
             events = events_result.get('items', [])
             
-            if not events:
-                return "The user has no calendar events. They are completely free."
-                
-            busy_blocks = []
             ist_tz = timezone(timedelta(hours=5, minutes=30), name="IST")
+            now_ist = now_utc.replace(tzinfo=timezone.utc).astimezone(ist_tz)
             
+            # 2. Build Busy Intervals (in IST)
+            busy_intervals = []
             for event in events:
-                # Handle both dateTime (standard) and date (all-day) formats
-                start_raw = event['start'].get('dateTime', event['start'].get('date'))
-                end_raw = event['end'].get('dateTime', event['end'].get('date'))
-                summary = event.get('summary', 'Busy')
+                start_raw = event['start'].get('dateTime')
+                end_raw = event['end'].get('dateTime')
+                if start_raw and end_raw:
+                    dt_start = datetime.fromisoformat(start_raw.replace('Z', '+00:00')).astimezone(ist_tz)
+                    dt_end = datetime.fromisoformat(end_raw.replace('Z', '+00:00')).astimezone(ist_tz)
+                    busy_intervals.append((dt_start, dt_end))
+                elif event['start'].get('date'):
+                    # All day event
+                    dt_start = datetime.strptime(event['start']['date'], '%Y-%m-%d').replace(tzinfo=ist_tz)
+                    dt_end = datetime.strptime(event['end']['date'], '%Y-%m-%d').replace(tzinfo=ist_tz)
+                    # For all day events, shift the end to the next day 00:00 correctly
+                    dt_end += timedelta(days=1)
+                    busy_intervals.append((dt_start, dt_end))
+            
+            # 3. Generate candidate slots (10 AM to 7 PM IST)
+            available_slots = []
+            # Start algorithm from today at 10 AM
+            current_day = now_ist.replace(hour=10, minute=0, second=0, microsecond=0)
+            
+            for _ in range(days):
+                slot_start = current_day
+                slot_end = current_day + timedelta(hours=9) # 10 AM to 7 PM IST
                 
-                try:
-                    # If it's a specific time (not all-day)
-                    if 'T' in start_raw:
-                        # Safely parse ISO string with Timezone offsets
-                        dt_start = datetime.fromisoformat(start_raw.replace('Z', '+00:00')).astimezone(ist_tz)
-                        dt_end = datetime.fromisoformat(end_raw.replace('Z', '+00:00')).astimezone(ist_tz)
-                        
-                        start_clean = dt_start.strftime("%A (%B %d) at %I:%M %p")
-                        end_clean = dt_end.strftime("%A (%B %d) at %I:%M %p")
-                        busy_blocks.append(f"- Busy Block: {start_clean} to {end_clean}")
-                    else:
-                        busy_blocks.append(f"- All-day busy on {start_raw}")
-                except Exception:
-                    busy_blocks.append(f"- Busy: {start_raw} to {end_raw}")
+                curr_slot = slot_start
+                if curr_slot.date() == now_ist.date():
+                    # If it's today, we can't schedule in the past. Push `curr_slot` ahead of `now_ist`
+                    if now_ist > curr_slot:
+                        minutes_to_next = 30 - (now_ist.minute % 30)
+                        curr_slot = now_ist + timedelta(minutes=minutes_to_next)
+                        curr_slot = curr_slot.replace(second=0, microsecond=0)
                 
-            return "\n".join(busy_blocks)
+                # Check 30-min intervals
+                while curr_slot + timedelta(minutes=30) <= slot_end:
+                    candidate_end = curr_slot + timedelta(minutes=30)
+                    overlap = False
+                    for b_start, b_end in busy_intervals:
+                        # Standard math: if max(start1, start2) < min(end1, end2), they overlap
+                        if max(curr_slot, b_start) < min(candidate_end, b_end):
+                            overlap = True
+                            break
+                    if not overlap:
+                        # Found a 100% free slot!
+                        iso_val = curr_slot.isoformat()
+                        human_val = curr_slot.strftime("%A, %B %d %Y at %I:%M %p")
+                        available_slots.append(f"[{iso_val}] {human_val}")
+                        # Removed the cap entirely so the AI can see the entire 7 days.
+                            
+                    curr_slot += timedelta(minutes=30)
+                
+                current_day += timedelta(days=1)
+                
+            if not available_slots:
+                return "CRITICAL ERROR: No available slots found in the next 7 days."
+                
+            return "\n".join(available_slots)
         except Exception as e:
-            print(f"❌ Failed to fetch calendar: {e}")
+            print(f"❌ Failed to precisely calculate slots: {e}")
             return "Could not determine calendar availability."
 
     def create_google_meet(self, guest_email: str, start_iso: str, duration_minutes: int = 30):
@@ -107,6 +141,39 @@ class GmailService:
         except Exception as e:
             print(f"❌ Failed to create Google Meet Room: {e}")
             return None
+
+    def block_calendar_time(self, start_iso: str, end_iso: str, title: str = "Busy (AI Blocked)"):
+        """
+        Creates a generic 'Busy' event in the calendar to block out requested time.
+        """
+        print(f"📅 CalendarService: Blocking time from {start_iso} to {end_iso} for '{title}'")
+        try:
+            start_dt = datetime.fromisoformat(start_iso.replace('Z', '+00:00'))
+            end_dt = datetime.fromisoformat(end_iso.replace('Z', '+00:00'))
+            
+            event = {
+                'summary': title,
+                'description': 'Time blocked natively by CoordAI Assistant.',
+                'start': {
+                    'dateTime': start_dt.isoformat(),
+                    'timeZone': 'Asia/Kolkata',
+                },
+                'end': {
+                    'dateTime': end_dt.isoformat(),
+                    'timeZone': 'Asia/Kolkata',
+                }
+            }
+            
+            result = self.calendar_service.events().insert(
+                calendarId='primary',
+                body=event
+            ).execute()
+            
+            print(f"✅ Executed Calendar Block! Event Id: {result.get('id')}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to block calendar time: {e}")
+            return False
 
     def read_unread_emails(self, max_results: int = 3):
         """
@@ -160,12 +227,12 @@ class GmailService:
 
     def send_email(self, to_email: str, subject: str, body_text: str, thread_id: str = None, message_id_header: str = None):
         """
-        Constructs and securely dispatches an email. If thread_id is provided, replies in-thread.
+        Constructs and securely dispatches an email. Supports full HTML to render interactive UI buttons.
         """
-        print(f"📧 GmailService: Dispatching email to {to_email} (Thread: {thread_id})...")
+        print(f"📧 GmailService: Dispatching HTML email to {to_email} (Thread: {thread_id})...")
         
         message = EmailMessage()
-        message.set_content(body_text)
+        message.add_alternative(body_text.replace('\n', '<br>'), subtype='html')
         message['To'] = to_email
         message['From'] = "me"
         message['Subject'] = subject

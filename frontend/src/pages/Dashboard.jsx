@@ -108,104 +108,121 @@ export default function Dashboard() {
         </div>
 
         {/* Stats Row */}
-        <div style={{ display: 'flex', gap: '16px' }}>
-          <div className="glass-panel" style={{ flex: 1, padding: '20px' }}>
-            <div style={{ fontSize: '2rem', color: 'var(--primary)', fontWeight: 300 }}>{metrics.active_workflows}</div>
-            <div style={{ fontSize: '0.85rem', fontWeight: 600 }}>Active Deals</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '4px' }}>Live Negotiations</div>
+        <div style={{ display: 'flex', gap: '20px' }}>
+          <div className="glass-panel dashboard-stat-card dashboard-stat-blue">
+            <div className="stat-value">{metrics.active_workflows}</div>
+            <div className="stat-label">Active Deals</div>
+            <div className="stat-subtext">
+               <div className="stat-dot"></div> Live Negotiations
+            </div>
           </div>
-          <div className="glass-panel" style={{ flex: 1, padding: '20px', borderLeft: '3px solid var(--warning)' }}>
-            <div style={{ fontSize: '2rem', color: 'var(--warning)', fontWeight: 300 }}>{tasks.length}</div>
-            <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--warning)' }}>Awaiting approval</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--warning)', marginTop: '4px' }}>Action needed</div>
+          <div className="glass-panel dashboard-stat-card dashboard-stat-warning">
+            <div className="stat-value">{tasks.length}</div>
+            <div className="stat-label">Awaiting Approval</div>
+            <div className="stat-subtext">
+               <div className="stat-dot"></div> Action needed
+            </div>
           </div>
-          <div className="glass-panel" style={{ flex: 1, padding: '20px' }}>
-            <div style={{ fontSize: '2rem', color: 'var(--success)', fontWeight: 300 }}>{metrics.emails_drafted}</div>
-            <div style={{ fontSize: '0.85rem', fontWeight: 600 }}>Total AI Actions</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--success)', marginTop: '4px' }}>Saved {metrics.hours_saved} hours</div>
+          <div className="glass-panel dashboard-stat-card dashboard-stat-success">
+            <div className="stat-value">{metrics.emails_drafted}</div>
+            <div className="stat-label">Total AI Actions</div>
+            <div className="stat-subtext">
+               <div className="stat-dot"></div> Saved {metrics.hours_saved} hours
+            </div>
           </div>
         </div>
 
         {/* Needs Your Decision (Approval Queue) */}
         <div>
-          <h3 style={{ fontSize: '1.1rem', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            Needs your decision <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem', fontWeight: 'normal' }}>({tasks.length})</span>
+          <h3 style={{ fontSize: '1.2rem', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-main)', fontWeight: 600 }}>
+            <div style={{ background: 'rgba(245, 158, 11, 0.15)', width: 32, height: 32, borderRadius: '8px', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+                <CheckCircle2 size={18} color="#fbbf24" />
+            </div>
+            Needs your decision 
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem', fontWeight: 'normal' }}>({tasks.length})</span>
           </h3>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             {tasks.length === 0 && !loading && (
-              <div className="glass-panel text-subtle" style={{ textAlign: 'center', padding: '32px' }}>
-                <CheckCircle2 size={32} style={{margin: '0 auto 12px', color: 'var(--success)'}}/>
-                Inbox is clear. Press "Share intake form" (Sync) to poll Gmail!
+              <div className="glass-panel text-subtle" style={{ textAlign: 'center', padding: '48px 32px', background: 'rgba(255,255,255,0.02)', border: '1px dashed rgba(255,255,255,0.1)' }}>
+                <div style={{ background: 'rgba(16, 185, 129, 0.1)', width: 64, height: 64, borderRadius: '50%', display: 'flex', justifyContent: 'center', alignItems: 'center', margin: '0 auto 16px' }}>
+                    <CheckCircle2 size={32} color="#34d399"/>
+                </div>
+                <h3 style={{ color: 'var(--text-main)', margin: '0 0 8px 0', fontSize: '1.1rem' }}>Inbox is clear</h3>
+                <p style={{ margin: 0 }}>Press "Sync Inbox" to poll your Gmail account.</p>
               </div>
             )}
             
             {tasks.map((task) => (
               <div 
                 key={task.id} 
-                className="glass-panel animate-slide-up" 
+                className="glass-panel dashboard-task-card animate-slide-up" 
                 style={{
-                  borderLeft: '4px solid var(--warning)',
-                  padding: '24px',
                   opacity: discarded.includes(task.id) || approved.includes(task.id) ? 0.5 : 1,
                   transform: discarded.includes(task.id) ? 'scale(0.95)' : 'scale(1)',
-                  transition: 'all 0.3s'
+                  transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)'
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
-                  <div>
-                    <h4 style={{ margin: 0, fontSize: '1.05rem', color: 'var(--text-main)' }}>{task.tenant}</h4>
-                    {task.contact_email && <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{task.contact_email}</div>}
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '20px' }}>
+                  <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+                      <div className="task-avatar">
+                          {task.tenant.charAt(0)}
+                      </div>
+                      <div>
+                        <h4 style={{ margin: 0, fontSize: '1.1rem', color: 'var(--text-main)', fontWeight: 600 }}>{task.tenant}</h4>
+                        {task.contact_email && <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '2px' }}>{task.contact_email}</div>}
+                      </div>
                   </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Confidence {task.confidence}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{task.stage === 'INBOUND_EMAIL' ? 'Inbox Scan' : 'Auto'}</div>
+                  <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.05)', padding: '4px 10px', borderRadius: '12px', color: '#cbd5e1', display: 'inline-block' }}>Confidence: {task.confidence}</div>
+                    <div style={{ fontSize: '0.75rem', background: 'rgba(16, 185, 129, 0.1)', padding: '4px 10px', borderRadius: '12px', color: '#34d399', display: 'inline-block' }}>{task.stage === 'INBOUND_EMAIL' ? 'Inbox Scan' : 'Auto'}</div>
                   </div>
                 </div>
 
                 {task.summary && (
-                  <div style={{ marginBottom: '16px', paddingLeft: '12px', borderLeft: '2px solid rgba(255,255,255,0.1)' }}>
-                    <div style={{ fontSize: '0.85rem', color: 'var(--primary)', marginBottom: '4px', fontWeight: 600 }}>AI Executive Summary</div>
-                    <div className="text-subtle" style={{ fontSize: '0.85rem', whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{task.summary}</div>
+                  <div className="task-summary-box">
+                    <div style={{ fontSize: '0.85rem', color: 'var(--primary)', marginBottom: '8px', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>AI Executive Summary</div>
+                    <div style={{ fontSize: '0.95rem', color: 'var(--text-main)', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{task.summary}</div>
                   </div>
                 )}
 
                 {editingId === task.id ? (
                   <textarea 
-                    style={{ width: '100%', minHeight: '120px', padding: '12px', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', color: 'white', border: '1px solid var(--primary)', resize: 'vertical', fontSize: '0.9rem', lineHeight: '1.5', outline: 'none', marginBottom: '16px' }}
+                    className="task-draft-edit"
                     value={editDraft}
                     onChange={(e) => setEditDraft(e.target.value)}
                   />
                 ) : (
-                  <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px', borderRadius: '8px', fontSize: '0.9rem', lineHeight: '1.5', color: 'var(--text-main)', marginBottom: '16px', whiteSpace: 'pre-wrap' }}>
+                  <div className="task-draft-view">
                     {task.draftContent}
                   </div>
                 )}
 
-                <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '20px' }}>
                   <button 
-                    className="btn" 
-                    style={{ background: 'white', color: 'black', fontWeight: 600, padding: '10px 20px' }}
+                    style={{ background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)', color: 'white', fontWeight: 600, padding: '12px 24px', borderRadius: '8px', border: 'none', cursor: 'pointer', boxShadow: '0 4px 14px rgba(59, 130, 246, 0.3)', transition: 'transform 0.2s' }}
                     onClick={() => handleApprove(task)}
+                    onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
+                    onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
                     disabled={approved.includes(task.id)}
                   >
                     {approved.includes(task.id) ? 'Sending...' : editingId === task.id ? 'Save & Send' : 'Approve & Send'}
                   </button>
                   
                   {editingId !== task.id ? (
-                    <button className="btn" onClick={() => { setEditingId(task.id); setEditDraft(task.draftContent); }}>
-                      <Edit3 size={16} style={{ marginRight: '6px' }} /> Edit first
+                    <button className="btn" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#f8fafc' }} onClick={() => { setEditingId(task.id); setEditDraft(task.draftContent); }}>
+                      <Edit3 size={16} /> Edit first
                     </button>
                   ) : (
-                    <button className="btn" onClick={() => setEditingId(null)}>Cancel</button>
+                    <button className="btn" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#f8fafc' }} onClick={() => setEditingId(null)}>Cancel</button>
                   )}
 
-                  <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
-                    <button className="btn" style={{ color: 'var(--warning)', borderColor: 'rgba(245, 158, 11, 0.3)' }} onClick={() => handleDiscard(task.id)}>
-                      <XCircle size={16} style={{ marginRight: '6px' }} /> Discard Draft
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: '12px' }}>
+                    <button className="btn" style={{ color: '#fbbf24', background: 'rgba(245, 158, 11, 0.05)', borderColor: 'rgba(245, 158, 11, 0.2)' }} onClick={() => handleDiscard(task.id)}>
+                      <XCircle size={16} /> Discard Draft
                     </button>
-                    <button className="btn" style={{ color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.3)' }} onClick={() => handleTrashGmail(task.id)}>
-                      <Trash2 size={16} style={{ marginRight: '6px' }} /> Trash original Gmail
+                    <button className="btn" style={{ color: '#ef4444', background: 'rgba(239, 68, 68, 0.05)', borderColor: 'rgba(239, 68, 68, 0.2)' }} onClick={() => handleTrashGmail(task.id)}>
+                      <Trash2 size={16} /> Trash Gmail
                     </button>
                   </div>
                 </div>

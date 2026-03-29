@@ -1,6 +1,7 @@
 import { Outlet, Navigate } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import TopNav from './TopNav';
+import ChatBubble from './ChatBubble';
 import { useAuth } from '../context/AuthContext';
 
 export default function Layout() {
@@ -20,6 +21,7 @@ export default function Layout() {
           <Outlet />
         </main>
       </div>
+      <ChatBubble />
     </div>
   );
 }
