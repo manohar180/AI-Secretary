@@ -1,12 +1,12 @@
 import { Link, useLocation } from 'react-router-dom';
 import { 
-  Monitor, CheckSquare, Workflow, Settings, Beaker 
+  Monitor, CheckSquare, Workflow, Settings, Beaker, Database, LogOut
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 export default function Sidebar() {
   const location = useLocation();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
 
   const SidebarSection = ({ title, items }) => (
     <div style={{ marginBottom: '24px' }}>
@@ -57,6 +57,9 @@ export default function Sidebar() {
           <Link to="/workflows" className={`nav-link ${location.pathname === '/workflows' ? 'active' : ''}`} style={{ padding: '8px 16px', fontSize: '0.95rem' }}>
             <Workflow size={18} style={{marginRight: '8px'}}/> Workflows
           </Link>
+          <Link to="/knowledge" className={`nav-link ${location.pathname === '/knowledge' ? 'active' : ''}`} style={{ padding: '8px 16px', fontSize: '0.95rem' }}>
+            <Database size={18} style={{marginRight: '8px'}}/> Knowledge Base
+          </Link>
           <Link to="/settings" className={`nav-link ${location.pathname === '/settings' ? 'active' : ''}`} style={{ padding: '8px 16px', fontSize: '0.95rem' }}>
             <Settings size={18} style={{marginRight: '8px'}}/> Identity
           </Link>
@@ -67,14 +70,30 @@ export default function Sidebar() {
 
       </nav>
       
-      <div style={{ padding: '16px', borderTop: '1px solid var(--glass-border)', display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'var(--primary)', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'white', fontWeight: 'bold' }}>
-          {(user?.name || 'A').charAt(0)}
+      <div style={{ padding: '16px', borderTop: '1px solid var(--glass-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'var(--primary)', display: 'flex', justifyContent: 'center', alignItems: 'center', color: 'white', fontWeight: 'bold' }}>
+            {(user?.name || 'A').charAt(0)}
+          </div>
+          <div>
+            <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'white' }}>{user?.name || 'Admin'}</div>
+            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>AI Secretary Access</div>
+          </div>
         </div>
-        <div>
-          <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'white' }}>{user?.name || 'Admin'}</div>
-          <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>AI Secretary Access</div>
-        </div>
+        
+        <button 
+          onClick={logout}
+          style={{ 
+            background: 'transparent', border: 'none', color: 'var(--text-muted)', 
+            cursor: 'pointer', padding: '6px', borderRadius: '6px', 
+            display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s ease'
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.background = 'transparent'; }}
+          title="Logout"
+        >
+          <LogOut size={18} />
+        </button>
       </div>
     </aside>
   );

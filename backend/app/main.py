@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, List
@@ -6,7 +6,11 @@ from typing import Dict, Any, List
 from app.models.workflow import PrivacySafeContext, AgentDecision
 from app.agents.orchestrator import Orchestrator
 from app.services.gmail_service import GmailService
+from app.services.knowledge_service import KnowledgeService
+from app.db import SessionLocal, WorkflowTask, ConversationLog, KnowledgeSource
 import uuid
+import os
+import shutil
 
 app = FastAPI(
     title="Inter-Company AI Workflow Layer",
@@ -29,17 +33,30 @@ app.add_middleware(
 )
 
 orchestrator = Orchestrator()
+
+# Dependency for strict relational persistence layer
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 # Initialize the Gmail Service (requires token.json)
 try:
     gmail_service = GmailService()
 except Exception as e:
     print(f"Warning: Could not init Gmail Service (is token.json missing?): {e}")
     gmail_service = None
+    
+# Initialize Hybrid ChromaDB Engine (Vector Search)
+try:
+    knowledge_service = KnowledgeService()
+except Exception as e:
+    print(f"Warning: ChromaDB boot failed (Pip installation still running?): {e}")
+    knowledge_service = None
 
-# --- Mock Database & Metrics ---
-DB_TASKS = {}
-PROCESSED_MESSAGE_IDS = set()  # Global tracker to prevent cloning syncs
-ACTIVITY_FEED = [] # Store historical AI actions
+# No longer need PROCESSED_MESSAGE_IDS!
 
 SYSTEM_METRICS = {
     "active_workflows": 0,
@@ -72,54 +89,17 @@ async def google_login(req: LoginRequest):
     }
 # --------------------------------
 
-class IncomingWebhook(BaseModel):
-    raw_text: str
-    tenant_id: str
-    contact_email: str
-    context_flags: Dict[str, Any]
-
-@app.post("/api/v1/workflow/webhook")
-async def process_webhook(payload: IncomingWebhook):
-    safe_context = PrivacySafeContext(
-        tenant_id=payload.tenant_id,
-        interaction_id="EXT-" + payload.contact_email.split('@')[1],
-        current_stage=payload.context_flags.get("current_stage", "CONTRACT_PENDING"),
-        days_in_stage=payload.context_flags.get("days_in_stage", 0),
-        requested_changes_count=payload.context_flags.get("changes_count", 0),
-        is_weekend_or_holiday=False
-    )
-
-    decision: AgentDecision = orchestrator.decide_next_action(safe_context)
-
-    task_id = str(uuid.uuid4())
-    task = {
-        "id": task_id,
-        "tenant": payload.tenant_id,
-        "stage": safe_context.current_stage,
-        "daysPending": safe_context.days_in_stage,
-        "actionElected": decision.proposed_action,
-        "confidence": f"{int(decision.confidence_score * 100)}%",
-        "draftContent": decision.draft_content,
-        "contact_email": payload.contact_email,
-        "status": "pending"
-    }
-    
-    # Update metrics dynamically
-    SYSTEM_METRICS["active_workflows"] += 1
-    SYSTEM_METRICS["emails_drafted"] += 1 if decision.proposed_action == "DRAFT_EMAIL" else 0
-    SYSTEM_METRICS["hours_saved"] += 0.25 # Assume 15 mins saved per automated draft
-    
-    # Save to "Database" for the Frontend to hit
-    DB_TASKS[task_id] = task
-
-    return {"status": "success", "task_id": task_id}
+    # Delete old webhook route for safety in this scope since we are pivoting models
+    return {"status": "success"}
 
 # --- SaaS Platform Settings Modules ---
 @app.get("/api/v1/metrics")
-async def get_metrics():
-    SYSTEM_METRICS["active_workflows"] = len([t for t in DB_TASKS.values() if t["status"] == "pending"])
-    total = len(DB_TASKS)
-    approved = sum(1 for t in DB_TASKS.values() if t["status"] == "approved")
+async def get_metrics(db = Depends(get_db)):
+    active = db.query(WorkflowTask).filter(WorkflowTask.status == "pending").count()
+    approved = db.query(WorkflowTask).filter(WorkflowTask.status == "approved").count()
+    total = active + approved
+    
+    SYSTEM_METRICS["active_workflows"] = active
     if total > 0:
         SYSTEM_METRICS["approval_rate"] = round((approved / total) * 100, 1)
         
@@ -150,14 +130,36 @@ async def test_google_integration():
 @app.delete("/api/v1/integrations/google")
 async def disconnect_google():
     # Hackathon Demo logic: just rename the token file temporarily to simulate a disconnect
+    global gmail_service
     import os
     if os.path.exists("token.json"):
         try:
             os.rename("token.json", "token_offline.json.bak")
         except:
             pass
-    # Need to restart server natively to kill service but this is good enough
+    gmail_service = None
     return {"status": "success", "message": "Google Integration severed."}
+
+@app.post("/api/v1/integrations/google/connect")
+async def connect_google():
+    """Forces the python backend to re-authenticate or restore the backup token natively."""
+    global gmail_service
+    import os
+    
+    # 1. Try to restore the backup token first if this was a UI "revoke"
+    if os.path.exists("token_offline.json.bak") and not os.path.exists("token.json"):
+        try:
+            os.rename("token_offline.json.bak", "token.json")
+        except Exception as e:
+            print(f"Failed restoring token: {e}")
+            
+    # 2. Try to re-instantiate the Gmail Service (this will pop the window if token.json is still missing!)
+    try:
+        gmail_service = GmailService()
+        return {"status": "connected"}
+    except Exception as e:
+        print(f"Failed to instantiate OAuth Flow: {e}")
+        return {"status": "failed", "error": str(e)}
 
 # --- Frontend Live Data API ---
 from fastapi.responses import HTMLResponse
@@ -217,10 +219,23 @@ async def chat_orchestrator(req: ChatRequest):
         
         # Initialize isolated Groq client
         groq_client = Groq(api_key=settings.GROQ_API_KEY)
-        from datetime import datetime
+        # === RAG CONTEXT INJECTION PIPELINE ===
+        # If Knowledge Base is active, silently search ChromaDB mathematically
+        rag_context = ""
+        if knowledge_service:
+            print("🧠 RAG: Executing Dense Vector Lookup...")
+            rag_context = knowledge_service.query_context(req.message, top_k=2)
+            if rag_context:
+                print(f"✅ RAG: Fetched {len(rag_context.split())} words of proprietary context!")
+        
         system_prompt = f"""
 You are the CoordAI Command Center Assistant. 
 CURRENT TIME: {datetime.now().isoformat()}
+
+You have access to the Private Company Knowledge Base. If relevant, use exactly this information to answer:
+--- START RAG CONTEXT ---
+{rag_context if rag_context else "No specific document matched this query."}
+--- END RAG CONTEXT ---
 
 You have THREE distinct capabilities. You must analyze the user's input and reply STRICTLY in valid JSON format. Do not use Markdown block syntax (```json). Just output raw JSON.
 
@@ -231,7 +246,7 @@ You have THREE distinct capabilities. You must analyze the user's input and repl
 2. "DRAFT_EMAIL": If the user explicitly states an email address and asks to write/draft an email to them.
    Format: {{"intent": "DRAFT_EMAIL", "recipient": "example@domain.com", "subject": "...", "body": "...", "response_text": "I have drafted the email. It is now waiting in your Approvals queue on the Dashboard!"}}
 
-3. "GENERAL_CHAT": For all other natural language queries.
+3. "GENERAL_CHAT": For all other natural language queries. Use the RAG Context to intelligently represent the company.
    Format: {{"intent": "GENERAL_CHAT", "response_text": "<Your conversational answer>"}}
 """
 
@@ -253,9 +268,20 @@ You have THREE distinct capabilities. You must analyze the user's input and repl
             raw_text = raw_text[3:-3]
             
         data = json.loads(raw_text.strip())
-        
         intent = data.get("intent", "GENERAL_CHAT")
         response_text = data.get("response_text", "Done.")
+        
+        # Save Conversation Turn to SQLite
+        try:
+            from app.db import SessionLocal
+            db = SessionLocal()
+            turn1 = ConversationLog(role="user", content=req.message, intent=intent)
+            turn2 = ConversationLog(role="agent", content=response_text, intent=intent)
+            db.add(turn1)
+            db.add(turn2)
+            db.commit()
+            db.close()
+        except: pass
         
         if intent == "BLOCK_CALENDAR":
             start_iso = data.get("start_iso")
@@ -269,23 +295,26 @@ You have THREE distinct capabilities. You must analyze the user's input and repl
                 response_text = "I couldn't parse the time properly, or Gmail is disconnected."
                 
         elif intent == "DRAFT_EMAIL":
-            # Push into the existing DB_TASKS workflow queue
-            import uuid
-            new_task = {
-                "id": str(uuid.uuid4())[:8],
-                "tenant": data.get("recipient", "Manual AI Draft").split("@")[0].title(),
-                "stage": "MANUAL_COMMAND",
-                "daysPending": 0,
-                "actionElected": "DRAFT_EMAIL",
-                "confidence": "100%",
-                "draftContent": data.get("body", "Failed to generate body..."),
-                "summary": "You explicitly requested this email to be drafted via the AI Command Center.",
-                "contact_email": data.get("recipient"),
-                "subject": data.get("subject", "Follow Up"),
-                "status": "pending"
-            }
-            DB_TASKS[new_task["id"]] = new_task
-            print(f"✅ AI Orchestrator manually pushed DRAFT_EMAIL task to Approvals.")
+            # Push securely into SQLite Workflow Pipeline
+            try:
+                from app.db import SessionLocal
+                db = SessionLocal()
+                new_task = WorkflowTask(
+                    tenant=data.get("recipient", "Manual AI Draft").split("@")[0].title(),
+                    stage="MANUAL_COMMAND",
+                    action_elected="DRAFT_EMAIL",
+                    confidence="100%",
+                    draft_content=data.get("body", "Failed to generate body..."),
+                    summary="You explicitly requested this email to be drafted via the AI Command Center.",
+                    contact_email=data.get("recipient"),
+                    subject=data.get("subject", "Follow Up")
+                )
+                db.add(new_task)
+                db.commit()
+                db.close()
+                print(f"✅ AI Orchestrator successfully committed SQLite DRAFT_EMAIL.")
+            except Exception as e:
+                print(f"SQLite Injection failure: {e}")
 
         return {"response_text": response_text}
     except Exception as e:
@@ -293,7 +322,7 @@ You have THREE distinct capabilities. You must analyze the user's input and repl
         return {"response_text": "I suffered an internal parsing failure. Please try another command."}
 
 @app.post("/api/v1/workflow/sync-inbox")
-async def sync_inbox():
+async def sync_inbox(db = Depends(get_db)):
     """
     Reads unread emails from the connected Gmail account, uses Groq to summarize,
     and automatically drafts a pending human-approved response.
@@ -307,7 +336,8 @@ async def sync_inbox():
     calendar_context = gmail_service.get_upcoming_availability(days=3) if gmail_service else "Unknown Schedule."
     
     for email in emails:
-        if email["id"] in PROCESSED_MESSAGE_IDS:
+        existing_task = db.query(WorkflowTask).filter(WorkflowTask.msg_id == email["id"]).first()
+        if existing_task:
             continue  # Already drafted this one!
             
         # Prevent replying to our own processing if we are stuck in a loop
@@ -410,29 +440,26 @@ async def sync_inbox():
             raw_sender = email['sender'].split("<")[0].strip()
             display_name = raw_sender if raw_sender else "Incoming Inquiry"
             
-            # Inject into UI Database!
-            task_id = str(uuid.uuid4())
-            DB_TASKS[task_id] = {
-                "id": task_id,
-                "tenant": display_name,
-                "stage": "INBOUND_EMAIL",
-                "daysPending": 0,
-                "actionElected": "DRAFT_EMAIL",
-                "confidence": f"{random.randint(89, 99)}%",
-                "draftContent": draft,
-                "summary": summary,
-                "contact_email": email['sender'].split("<")[-1].replace(">", "") if "<" in email['sender'] else email['sender'],
-                "subject": f"Re: {email['subject'].replace('Re: ', '')}",
-                "msg_id": email['id'],
-                "thread_id": email['thread_id'],
-                "message_id_header": email['message_id_header'],
-                "schedule_time": schedule_time,
-                "proposed_slots": proposed_slots,
-                "status": "pending"
-            }
+            # Inject directly into SQLite
+            new_task = WorkflowTask(
+                tenant=display_name,
+                stage="INBOUND_EMAIL",
+                action_elected="DRAFT_EMAIL",
+                confidence=f"{random.randint(89, 99)}%",
+                draft_content=draft,
+                summary=summary,
+                contact_email=email['sender'].split("<")[-1].replace(">", "") if "<" in email['sender'] else email['sender'],
+                subject=f"Re: {email['subject'].replace('Re: ', '')}",
+                msg_id=email['id'],
+                thread_id=email['thread_id'],
+                message_id_header=email['message_id_header'],
+                schedule_time=schedule_time,
+                proposed_slots=proposed_slots
+            )
+            db.add(new_task)
+            db.commit()
             
-            PROCESSED_MESSAGE_IDS.add(email['id'])
-            
+            # Update metrics globally
             SYSTEM_METRICS["active_workflows"] += 1
             SYSTEM_METRICS["emails_drafted"] += 1
             SYSTEM_METRICS["hours_saved"] += 0.25
@@ -442,47 +469,59 @@ async def sync_inbox():
             
     return {"status": "success", "synced_count": len(emails)}
 @app.get("/api/v1/workflows")
-async def get_workflows():
-    # Return all pending tasks
-    pending = [task for task in DB_TASKS.values() if task["status"] == "pending"]
-    return {"tasks": pending}
+async def get_workflows(db = Depends(get_db)):
+    # Return all pending tasks from SQLite
+    tasks = db.query(WorkflowTask).filter(WorkflowTask.status == "pending").order_by(WorkflowTask.created_at.desc()).all()
+    # Serialize to JSON array matching what React expects
+    results = []
+    for t in tasks:
+        results.append({
+            "id": t.id, "tenant": t.tenant, "contact_email": t.contact_email, "subject": t.subject,
+            "stage": t.stage, "daysPending": t.days_pending, "actionElected": t.action_elected,
+            "confidence": t.confidence, "summary": t.summary, "draftContent": t.draft_content,
+            "proposed_slots": t.proposed_slots, "schedule_time": t.schedule_time,
+            "thread_id": t.thread_id, "message_id_header": t.message_id_header, "msg_id": t.msg_id,
+            "status": t.status
+        })
+    return {"tasks": results}
 
 @app.put("/api/v1/workflows/{task_id}")
-async def update_workflow(task_id: str, payload: dict):
-    if task_id not in DB_TASKS:
+async def update_workflow(task_id: str, payload: dict, db = Depends(get_db)):
+    task = db.query(WorkflowTask).filter(WorkflowTask.id == task_id).first()
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    # Allow manual human editing of the draft!
     if "draftContent" in payload:
-        DB_TASKS[task_id]["draftContent"] = payload["draftContent"]
+        task.draft_content = payload["draftContent"]
+        db.commit()
         
-    return {"status": "success", "task": DB_TASKS[task_id]}
+    return {"status": "success"}
 
 @app.post("/api/v1/workflows/{task_id}/approve")
-async def approve_workflow(task_id: str):
-    if task_id not in DB_TASKS:
+async def approve_workflow(task_id: str, db = Depends(get_db)):
+    task = db.query(WorkflowTask).filter(WorkflowTask.id == task_id).first()
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
         
-    task = DB_TASKS[task_id]
-    if task["status"] == "approved":
+    if task.status == "approved":
         return {"status": "already_approved"}
         
     # Send the email using Threading if it originated from an Inbox Sync!
-    if gmail_service and task["actionElected"] == "DRAFT_EMAIL":
-        subject = task.get("subject", f"Following up on {task['tenant']}")
-        body_text = task.get("draftContent", "")
+    if gmail_service and task.action_elected == "DRAFT_EMAIL":
+        subject = task.subject or f"Following up on {task.tenant}"
+        body_text = task.draft_content or ""
         
         # --- PHASE 13: AUTOMATED GOOGLE MEET SCHEDULING ---
-        if task.get("schedule_time"):
-            print(f"Intercepted Intent to Schedule Meeting upon User Approval! Time: {task['schedule_time']}")
-            meet_link = gmail_service.create_google_meet(task['contact_email'], task['schedule_time'])
+        if task.schedule_time:
+            print(f"Intercepted Intent to Schedule Meeting upon User Approval! Time: {task.schedule_time}")
+            meet_link = gmail_service.create_google_meet(task.contact_email, task.schedule_time)
             if meet_link:
                 body_text = body_text.replace("[MEET_LINK]", f"\n{meet_link}")
             else:
                 body_text = body_text.replace("[MEET_LINK]", "\nI will send a separate calendar invite shortly.")
         
         # --- PHASE 14: INTERACTIVE EMAIL HTML BUTTONS ---
-        if task.get("proposed_slots") and not task.get("schedule_time"):
+        if task.proposed_slots and not task.schedule_time:
             import urllib.parse
             from datetime import datetime
             
@@ -493,11 +532,10 @@ async def approve_workflow(task_id: str):
             button_html += "<p style='margin-top:0; font-weight:600; color: #0f172a;'>Select a time below to auto-schedule a Google Meet:</p>"
             button_html += "<div style='display: flex; gap: 10px; flex-wrap: wrap;'>"
             
-            # Use Localhost for Hackathon demo, in production use ENV or NGROK
             base_url = "http://localhost:8000"
-            safe_email = urllib.parse.quote(task['contact_email'])
+            safe_email = urllib.parse.quote(task.contact_email)
             
-            for iso_time in task['proposed_slots']:
+            for iso_time in task.proposed_slots:
                 try:
                     dt = datetime.fromisoformat(iso_time.replace('Z', '+00:00'))
                     clean_time = dt.strftime("%A, %I:%M %p")
@@ -511,66 +549,131 @@ async def approve_workflow(task_id: str):
             button_html += "</div></div>"
             body_text += button_html
             
-        print(f"User Approved! Dispatching Live Email to {task['contact_email']} via Gmail API...")
+        print(f"User Approved! Dispatching Live Email to {task.contact_email} via Gmail API...")
         
         try:
             gmail_service.send_email(
-                to_email=task['contact_email'],
+                to_email=task.contact_email,
                 subject=subject,
                 body_text=body_text,
-                thread_id=task.get("thread_id"),
-                message_id_header=task.get("message_id_header")
+                thread_id=task.thread_id,
+                message_id_header=task.message_id_header
             )
             # Log successful dispatch into the historical feed
             import datetime
             time_str = datetime.datetime.now().strftime("%I:%M %p")
-            ACTIVITY_FEED.append({
-                "id": str(uuid.uuid4()),
-                "message": f"Sent negotiated follow-up to {task['tenant']}",
-                "time": time_str,
-                "type": "draft_sent"
-            })
+            log = ConversationLog(role="system", content=f"Sent negotiated follow-up to {task.tenant}", timestamp=datetime.datetime.utcnow())
+            db.add(log)
+            db.commit()
         except Exception as e:
             print(f"Error sending threaded email: {e}")
     
-    task["status"] = "approved"
+    task.status = "approved"
+    db.commit()
     return {"status": "success"}
 
 @app.delete("/api/v1/workflows/{task_id}")
-async def discard_workflow(task_id: str):
-    """Discards the AI workflow but leaves the original email safely untouched in Gmail."""
-    if task_id in DB_TASKS:
-        del DB_TASKS[task_id]
+async def discard_workflow(task_id: str, db = Depends(get_db)):
+    task = db.query(WorkflowTask).filter(WorkflowTask.id == task_id).first()
+    if task:
+        task.status = "discarded"
+        db.commit()
     return {"status": "success"}
 
 @app.delete("/api/v1/workflows/{task_id}/gmail")
-async def trash_workflow_and_gmail(task_id: str):
-    """Trashes the AI workflow AND moves the original email into the Gmail Trash bin."""
-    if task_id not in DB_TASKS:
+async def trash_workflow_and_gmail(task_id: str, db = Depends(get_db)):
+    task = db.query(WorkflowTask).filter(WorkflowTask.id == task_id).first()
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
         
-    task = DB_TASKS[task_id]
-    
-    # Actually hit the Gmail API if this is an Inbox Sync email
-    if gmail_service and "msg_id" in task:
-        gmail_service.trash_email(task["msg_id"])
+    if gmail_service and task.msg_id:
+        gmail_service.trash_email(task.msg_id)
         
     import datetime
-    time_str = datetime.datetime.now().strftime("%I:%M %p")
-    ACTIVITY_FEED.append({
-        "id": str(uuid.uuid4()),
-        "message": f"Trashed workflow for {task['tenant']}",
-        "time": time_str,
-        "type": "trashed"
-    })
-    
-    del DB_TASKS[task_id]
+    log = ConversationLog(role="system", content=f"Trashed workflow for {task.tenant}", timestamp=datetime.datetime.utcnow())
+    db.add(log)
+    task.status = "trashed_in_gmail"
+    db.commit()
+
     return {"status": "success"}
 
 @app.get("/api/v1/activity")
-async def get_activity_feed():
-    return {"feed": list(reversed(ACTIVITY_FEED))[:15]}
+async def get_activity_feed(db = Depends(get_db)):
+    feed = db.query(ConversationLog).filter(ConversationLog.role == "system").order_by(ConversationLog.timestamp.desc()).limit(15).all()
+    results = []
+    for f in feed:
+        results.append({
+            "id": f.id,
+            "message": f.content,
+            "time": f.timestamp.strftime("%I:%M %p"),
+            "type": "system"
+        })
+    return {"feed": results}
 
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+# === FILE UPLOAD AND KNOWLEDGE BASE (RAG) ROUTES ===
+
+@app.post("/api/v1/knowledge/upload")
+async def upload_document(file: UploadFile = File(...), db = Depends(get_db)):
+    """Accepts PDF/TXT, stores it in SQLite, and pipelines to ChromaDB."""
+    if not knowledge_service:
+        raise HTTPException(status_code=500, detail="ChromaDB engine is uninitialized.")
+        
+    valid_extensions = ["pdf", "txt"]
+    ext = file.filename.split(".")[-1].lower() if "." in file.filename else ""
+    if ext not in valid_extensions:
+        raise HTTPException(status_code=400, detail="Only PDF and TXT files are accepted.")
+        
+    # Generate unique storage path
+    upload_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    file_path = os.path.join(upload_dir, f"{str(uuid.uuid4())[:8]}_{file.filename}")
+    
+    # Save the actual bytes to disk
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    size_bytes = os.path.getsize(file_path)
+    
+    # 1. Create SQLite relational record
+    db_source = KnowledgeSource(
+        filename=file.filename,
+        file_size_bytes=size_bytes,
+        status="embedding"
+    )
+    db.add(db_source)
+    db.commit()
+    db.refresh(db_source)
+    
+    # 2. Extract, chunk, and embed into ChromaDB
+    try:
+        success = knowledge_service.ingest_document(file_path, db_source.id, file.filename)
+        db_source.status = "active" if success else "failed"
+        db.commit()
+    except Exception as e:
+        db_source.status = "failed"
+        db.commit()
+        raise HTTPException(status_code=500, detail=f"Embedding failure: {e}")
+        
+    return {
+        "id": db_source.id,
+        "filename": db_source.filename,
+        "status": db_source.status
+    }
+
+@app.get("/api/v1/knowledge")
+async def list_knowledge_sources(db = Depends(get_db)):
+    sources = db.query(KnowledgeSource).order_by(KnowledgeSource.uploaded_at.desc()).all()
+    results = []
+    for s in sources:
+        results.append({
+            "id": s.id,
+            "filename": s.filename,
+            "size_str": f"{round(s.file_size_bytes / 1024 / 1024, 2)} MB",
+            "status": s.status,
+            "date": s.uploaded_at.strftime("%b %d, %Y")
+        })
+    return {"sources": results}

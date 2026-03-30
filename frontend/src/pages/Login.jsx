@@ -20,8 +20,10 @@ export default function Login() {
 
   return (
     <div style={{ width: '100vw', minHeight: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center', position: 'relative', overflow: 'hidden', background: '#020617' }}>
-      <div className="ambient-orb orb-1" style={{ background: '#3b82f6', opacity: 0.15 }}></div>
-      <div className="ambient-orb orb-2" style={{ background: '#10b981', opacity: 0.15 }}></div>
+      <div className="ambient-orb orb-1" style={{ background: '#3b82f6', opacity: 0.25, transform: 'scale(1.2)' }}></div>
+      <div className="ambient-orb orb-2" style={{ background: '#10b981', opacity: 0.20, transform: 'scale(1.5)' }}></div>
+      <div className="ambient-orb" style={{ background: '#8b5cf6', opacity: 0.15, top: '20%', left: '20%', animation: 'float 20s infinite reverse', transform: 'scale(1.8)' }}></div>
+      <div className="ambient-orb" style={{ background: '#eab308', opacity: 0.1, bottom: '10%', right: '30%', animation: 'float 15s infinite', transform: 'scale(0.8)' }}></div>
       
       {/* Landing Page */}
       <div className="glass-panel animate-slide-up" style={{ width: '100%', maxWidth: '1000px', display: 'flex', flexDirection: 'row', position: 'relative', zIndex: 1, padding: 0, overflow: 'hidden', background: 'rgba(15, 23, 42, 0.7)', border: '1px solid rgba(255,255,255,0.05)', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)' }}>
@@ -83,6 +85,16 @@ export default function Login() {
                             useOneTap
                             width="316"
                         />
+                    </div>
+                    
+                    <div style={{ marginTop: '32px', padding: '16px', background: 'rgba(59, 130, 246, 0.05)', border: '1px solid rgba(59, 130, 246, 0.2)', borderRadius: '12px', textAlign: 'left' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                            <ShieldAlert size={16} color="#3b82f6" />
+                            <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#f8fafc' }}>Access Architecture</span>
+                        </div>
+                        <p style={{ margin: 0, fontSize: '0.75rem', color: '#94a3b8', lineHeight: '1.5' }}>
+                            Currently, <strong>global identity verification</strong> is active. Any valid Google account may authenticate to establish a session. However, to deploy autonomous AI capabilities, you must explicitly bind your backend Workspace (Calendar/Gmail) offline inside the internal Configuration portal.
+                        </p>
                     </div>
                     
                     <p style={{ marginTop: '24px', fontSize: '0.75rem', color: '#475569' }}>

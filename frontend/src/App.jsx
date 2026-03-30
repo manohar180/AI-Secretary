@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Workflows from './pages/Workflows';
 import Settings from './pages/Settings';
 import Integrations from './pages/Integrations';
+import Knowledge from './pages/Knowledge';
 import IntakeForm from './pages/IntakeForm';
 import './index.css';
 
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/" element={<Layout />}>
             <Route index element={<Dashboard />} />
             <Route path="workflows" element={<Workflows />} />
+            <Route path="knowledge" element={<Knowledge />} />
             <Route path="settings" element={<Settings />} />
             <Route path="configuration" element={<Integrations />} />
           </Route>
